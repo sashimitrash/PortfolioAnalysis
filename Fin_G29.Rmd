@@ -1,0 +1,611 @@
+---
+title: "Group 29 BT2201 Finance Report"
+author: Tan Sin Chez, Jaron A0238881R, Soh Zuan, Azumi A0239407B, Roshan Zabiullah A0234036N, Kok Ming Rong Marcus A0233850J, Tan Wenyuan Ignatius A0233647B
+output: beamer_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE, comment="")
+library(stringr)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(XML)
+library(quantmod) # functions getSymbols, to.yearly, etc. 
+library(PerformanceAnalytics) # Return.Calculate
+library(fPortfolio)
+
+### Get ETF Data ###
+start = "2005-12-31"
+tickers = c("BIV", "VCSH", "BNDX", "VNQI",
+            "VNQ","1306.T", "EDV", "VGK",
+            "VOO","IAU","BCI",
+            "DBEM","ICLN")
+USD.AUD <- getSymbols("AUD=X", auto.assign=FALSE, from=start, src="yahoo") #number of AUD per 1 USD
+USD.JPY <- getSymbols("JPY=X", auto.assign=FALSE, from=start, src="yahoo") #number of JPY per 1 USD
+USD.HKD <- getSymbols("HKD=X", auto.assign=FALSE, from=start, src="yahoo") #number of HK per 1 USD
+portfolioPrices <- NULL
+for (i in tickers){
+  if (i =="1306.T"){
+    #convert to USD from JPY
+    portfolioPrices <- cbind(portfolioPrices,
+                             Ad(to.monthly(getSymbols(i, auto.assign=FALSE, from=start, src='yahoo')/USD.JPY)))
+  } else if (i == "3010.HK"){
+    portfolioPrices <- cbind(portfolioPrices,
+                             Ad(to.monthly(getSymbols(i, auto.assign=FALSE, from=start, src='yahoo')/USD.HKD)))
+  } else {
+    portfolioPrices <- cbind(portfolioPrices, 
+                             Ad(to.monthly(getSymbols(i, auto.assign=FALSE, from=start, src='yahoo'))))
+  }
+}
+colnames(portfolioPrices) <- tickers
+
+### Get Proxy Data ###
+proxies = c("AGG", "AGG", "IGSB", "SPY",
+            "DBC", "EEM", "PBW")
+proxyPrices <- NULL
+for (i in proxies){
+  if (i == "^AXPJ"){
+    #convert to USD from AUD
+    proxyPrices <- cbind(proxyPrices, 
+                         Ad(to.monthly(getSymbols(i, auto.assign=FALSE, from=start, src='yahoo')/USD.AUD)))
+  } else{
+    proxyPrices <- cbind(proxyPrices, 
+                         Ad(to.monthly(getSymbols(i, auto.assign=FALSE, from=start, src='yahoo'))))
+  }
+}
+colnames(proxyPrices) <- proxies
+
+### Proxy Prices ###
+portfolioPrices.proxy <- xts(portfolioPrices)
+tobeproxied <- c("BNDX", "BIV", "VCSH", "VOO",
+                 "BCI", "DBEM", "ICLN")
+for(j in 1:length(tobeproxied)) {
+  for(i in 1:nrow(portfolioPrices)) {
+    if (is.na(portfolioPrices[i,tobeproxied[j]])) {
+      portfolioPrices.proxy[i,tobeproxied[j]] <- proxyPrices[i,proxies[j]]
+    } else {
+      break
+    }
+  }
+}
+
+### Get Returns ###
+R_it <- Return.calculate(portfolioPrices.proxy[, 1:length(tickers)])[-1]
+R_it
+#R_it <- R_it["/2020-12"] # omit backtest period
+
+### Get Benchmark Data ###
+benchmarkPrices <- NULL
+benchmarkPrices <- cbind(benchmarkPrices,
+                         Ad(to.monthly(getSymbols("ACWI", auto.assign=FALSE, from=start, src='yahoo'))))
+benchmarkPrices <- cbind(benchmarkPrices,
+                         Ad(to.monthly(getSymbols("AGG", auto.assign=FALSE, from=start, src='yahoo'))))
+colnames(benchmarkPrices) <- c("ACWI","BGA")
+benchmarkReturns <- Return.calculate(benchmarkPrices[, 1:2])[-1]
+benchmarkReturns <- na.omit(benchmarkReturns)
+benchmarkReturns$ACWI.60 <- 0.6*benchmarkReturns$ACWI # 60% of ACWI
+benchmarkReturns$BGA.40 <- 0.4*benchmarkReturns$BGA # 40% of BGA
+R_mkt <- benchmarkReturns$ACWI.60+benchmarkReturns$BGA.40
+R_mkt
+colnames(R_mkt) <- c("Benchmark")
+#R_mkt <- R_mkt["/2020-12"] # omit backtest period
+
+### CAPM Regression ###
+capm_alpha <- c()
+capm_beta <- c()
+for(i in 1:ncol(R_it)) {
+  capm_y <- R_it[ , i]
+  capm_x <- R_mkt$Benchmark
+  capm_merge <-  na.omit(merge(capm_y, capm_x))
+  capm_reg <- lm(capm_merge[,1]~capm_merge[,2]) 
+  capm_alpha <- c(capm_alpha, summary(capm_reg)$coefficients[1])
+  capm_beta <- c(capm_beta, summary(capm_reg)$coefficients[2])
+}
+capm_coeff <- data.frame(capm_alpha, capm_beta)
+rownames(capm_coeff) <- tickers
+
+### Calculate historical mu/sd ###
+hist.mu <- sapply(na.omit(R_it),mean)
+hist.sd <- sapply(na.omit(R_it),sd)
+hist <- cbind(hist.mu,hist.sd)
+rownames(hist) <- tickers
+
+### Calculate capm mu ###
+Rf = 0.0076
+Rm = 0.05
+capm.mu <- Rf + capm_coeff$capm_beta*Rm
+capm <- cbind(capm.mu)
+rownames(capm) <- tickers
+
+### Get aggregated mu and cov matrix ###
+cov <- cov(R_it,use="pairwise.complete.obs")
+cor <- cor(R_it,use="pairwise.complete.obs")
+agg_mu <- (2/3)*capm[,"capm.mu"] + (1/3)*hist[,"hist.mu"] # take 1/3 of historical mean and 2/3 of CAPM expected returns
+agg_mu <- as.numeric(agg_mu)
+
+### Get Portfolio Weights ###
+covtEstimator <- function (x, spec = NULL, ...) {
+  x.mat = as.matrix(x)
+  list(mu = agg_mu, Sigma = cov) #Input your mean and covariance matrix here.
+} 
+defaultSpec <- portfolioSpec()
+setEstimator(defaultSpec) <- "covtEstimator"
+setNFrontierPoints(defaultSpec) <- 200
+
+portfolioReturns <- as.timeSeries(na.omit(R_it))
+myPort <- portfolioFrontier(portfolioReturns, defaultSpec, constraints = "LongOnly")
+frontier_weights_box <- getPortfolio(myPort)$weights
+colnames(frontier_weights_box) <- tickers
+frontier_returns_box <- getPortfolio(myPort)$targetReturn
+frontier_risk_box <- getPortfolio(myPort)$targetRisk
+frontier_info_box <- cbind(frontier_weights_box, frontier_returns_box, frontier_risk_box)
+
+```
+
+## ETF Summary
+
+```{r ETF Summary, fig.width=5}
+# Yahoo web scrape Analysts
+info <- NULL
+
+tickers = c("1306.T", "VOO", "VGK", "DBEM", "VCSH",
+            "BNDX","EDV", "BIV", "VNQI","VNQ",
+            "IAU", "BCI", "ICLN")
+
+beta_values <- c(0.90, 1.96, 2.17, 1.58, 0.00862, -0.02660, -0.78522,
+                    -0.04980, 1.36, 2.02, 0.108, 0.641, 2.705)
+    
+three_year <- c(10.26, 18.93, 8.30, 11.06, 1.58, 0.63, 4.24, 2.16, 0.41,
+                    11.39, 12.12, 15.70, 38.32)
+
+for (symbol in tickers){
+  if (symbol =="1306.T"){
+    info1 <- c("15,706 (Yen)", "NA","excluded", "NA","10.26","exluded","0.11","2001-07-11")
+    info <- rbind(info, info1)
+  }else{
+    url <- paste('https://finance.yahoo.com/quote/',symbol,'?p=',symbol,sep="")
+    webpage <- readLines(url, warn= FALSE)
+    html <- htmlTreeParse(webpage, useInternalNodes = TRUE, asText = TRUE)
+    tableNodes <- getNodeSet(html, "//table")
+
+    t1 <- readHTMLTable(tableNodes[[1]])
+    t2 <- readHTMLTable(tableNodes[[2]])
+    t2$V2[1] <- str_remove(t2$V2[1],"B")
+    t2$V1[1] <- "Net Assets (bn)"
+    t2$V2[4:6] <- str_remove(t2$V2[4:6],"%")
+    t2$V2[7] <- str_remove(t2$V2[7],"%")
+    t2$V1[4] <- "Yield (%)"
+    t2$V1[5] <- "3 Year Annualised Return"
+    t2$V1[7] <- "Expense Ratio (%)"
+  
+    info <- rbind(info, t2$V2)
+    colnames(info) <- t2$V1
+    
+  }
+}
+
+rownames(info) <- tickers
+info <- as.data.frame(info)
+
+drops <- c("PE Ratio (TTM)", "Beta (5Y Monthly)","NAV","Yield (%)")
+info <- info[ , !(names(info) %in% drops)]
+
+currency <- c('JPY','USD','USD','USD',
+              'USD', 'USD','USD','USD',
+              'USD','USD','USD',
+              "USD", 'USD')
+Asset_Type <- c("JP Equity Fund","S&P 500","EU Index Fund","Emerging Market
+                Equity", "US Short Term Corp Bond", "International Bond
+                Index","US Long Term Bond", "US Intermediate Term Bond",
+                "Global REITs (ex US)", "US REITs", "Gold Bullion",
+                "Commodities", "Clean energy")
+
+reg_beta <- cbind(rownames(capm_coeff), data.frame(capm_coeff, row.names=NULL))
+reg_beta <- reg_beta[reg_beta$`rownames(capm_coeff)` %in% tickers, ]
+ 
+info <- cbind(currency,Asset_Type,info, round(reg_beta$capm_beta,2))
+
+names(info)[2] <- paste("Asset Type")
+names(info)[7] <- paste("Beta")
+
+info$`3 Year Annualised Return` <- three_year
+info$Beta <- beta_values
+
+equity <- info[1:4,]
+fixed_income <- info[5:8,]
+reits <- info[9:10,]
+comm <- info[11:13,]
+
+```
+
+### Equities
+```{r Equities}
+kable(equity) %>% kable_styling(latex_options = "scale_down")
+```
+
+### Fixed Income
+```{r fixed Income}
+kable(fixed_income) %>% kable_styling(latex_options = "scale_down")
+```
+
+## ETF Summary
+### Real Estate Investment Trust
+```{r REIT}
+kable(reits) %>% kable_styling(latex_options="scale_down")
+```
+
+### Gold and Commodity
+```{r comm}
+kable(comm) %>% kable_styling(latex_options="scale_down")
+```
+
+## Efficient Frontier
+
+```{r eff frontier}
+tailoredFrontierPlot(object=myPort, return="mu", risk="Sigma", sharpeRatio = FALSE)
+```
+
+## Low Risk Portfolio
+
+```{r low pie, fig.width=5,fig.height=3}
+### Function to plot piechart ###
+piechart <- function(p) {
+  port <- data.frame(
+    etf = tickers,
+    returns = round(frontier_weights_box[p,]*100,2)
+  )
+  port <- arrange(port, desc(returns))
+  slice <- c()
+  for(i in 1:nrow(port)) {
+    if (port[i,"returns"] == 0) {
+      slice <- c(slice,i)
+    }
+  }
+  port <- slice(port, -slice)
+  port$etf <- paste(port$etf, "+", port$returns, "%")
+  port$etf <- factor(port$etf, levels = rev(as.character(port$etf)))
+  
+  blank_theme <-
+    theme(
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      panel.grid=element_blank(),
+      axis.ticks = element_blank(),
+      axis.text.x=element_blank()
+    )
+  chart <- ggplot(port, aes("", returns, fill = etf)) +
+    geom_bar(width = 1, size = 0.5, color = "black", stat = "identity") +
+    coord_polar("y") +
+    blank_theme +
+    guides(fill=guide_legend("Portfolio omposition", reverse=T)) +
+    scale_fill_manual(values=c("#fafa6e","#c4ec74","#92dc7e","#64c987","#39b48e",
+                               "#089f8f","#00898a","#08737f","#215d6e","#2a4858","#172E3A","#091921"))
+  return(chart)
+}
+
+### Exposures Function ###
+exposures <- function(p) {
+  USD = 12
+  JPY = 1
+  ALL = 13
+  for(i in 1:length(tickers)) {
+    if (round(frontier_weights_box[p,tickers[i]],2)==0) {
+      if (tickers[i] == "1306.T") {
+        JPY <- JPY - 1
+        ALL <- ALL - 1
+      } else {
+        USD <- USD - 1
+        ALL <- ALL - 1
+      }
+    }
+  }
+  exp <- data.frame("USD"=c(paste(round((USD/ALL)*100,1),"%")),
+                    "JPY"=c(paste(round((JPY/ALL)*100,1),"%")))
+  return(exp)
+}
+
+makingpie <- function(p) {
+  USD = 12
+  JPY = 1
+  ALL = 13
+  for(i in 1:length(tickers)) {
+    if (round(frontier_weights_box[p,tickers[i]],2)==0) {
+      if (tickers[i] == "1306.T") {
+        JPY <- JPY - 1
+        ALL <- ALL - 1
+      } else {
+        USD <- USD - 1
+        ALL <- ALL - 1
+      }
+    }
+  }
+  names <- c("USD", "JPY")
+  values <- c(round((USD/ALL),3), round((JPY/ALL),3))
+  exp <- data.frame(names, values)
+  return(exp)
+}
+
+### Chosen Portfolio Rows ###
+l = 50
+m = 99
+h = 124
+
+piechart(l)
+table.low <- as.data.frame(cbind(paste(round(frontier_info_box[l,"mu"]*100,2), "%"),
+                                 paste(round(frontier_info_box[l,"Cov"]*100,2), "%")))
+colnames(table.low) <- c("Returns","Risks")
+
+kable(table.low)
+```
+
+## Currency breakdown of Low Risk Portfolio
+
+```{r curr lowpie, fig.width=5, fig.height=5}
+lbls <- makingpie(l)$names
+pct <- round(as.numeric(makingpie(l)$values)/sum(as.numeric(makingpie(l)$values)),3)*100
+lbls <- paste(lbls, pct) # add percents to labels
+lbls <- paste(lbls,"%",sep="") # ad % to labels
+colours <- c("#fafa6e", "#00898a")
+pie(makingpie(l)$values, labels = lbls, col=colours, clockwise = TRUE)
+```
+
+## Mid Risk Portfolio
+
+```{r mid pie, fig.width=5,fig.height=3}
+piechart(m)
+table.mid <- as.data.frame(cbind(paste(round(frontier_info_box[m,"mu"]*100,2), "%"),
+                                 paste(round(frontier_info_box[m,"Cov"]*100,2), "%")))
+colnames(table.mid) <- c("Returns","Risks")
+
+kable(table.mid)
+```
+
+## Currency breakdown of Mid Risk Portfolio
+
+```{r curr mid pie, fig.width=5, fig.height=5}
+lbls <- makingpie(m)$names
+pct <- round(as.numeric(makingpie(m)$values)/sum(as.numeric(makingpie(m)$values)),3)*100
+lbls <- paste(lbls, pct) # add percents to labels
+lbls <- paste(lbls,"%",sep="") # ad % to labels
+colours <- c("#fafa6e", "#00898a")
+pie(makingpie(m)$values, labels = lbls, col=colours, clockwise = TRUE)
+```
+
+
+## High Risk Portfolio
+
+```{r high pie, fig.width=5, fig.height=3}
+piechart(h)
+table.high <- as.data.frame(cbind(paste(round(frontier_info_box[h,"mu"]*100,2), "%"),
+                                  paste(round(frontier_info_box[h,"Cov"]*100,2), "%")))
+colnames(table.high) <- c("Returns","Risks")
+
+kable(table.high)
+```
+
+## Currency breakdown of High Risk Portfolio
+
+```{r curr high pie, fig.width=5, fig.height=5}
+lbls <- makingpie(h)$names
+pct <- round(as.numeric(makingpie(h)$values)/sum(as.numeric(makingpie(h)$values)),3)*100
+lbls <- paste(lbls, pct) # add percents to labels
+lbls <- paste(lbls,"%",sep="") # ad % to labels
+colours <- c("#fafa6e", "#00898a")
+pie(makingpie(h)$values, labels = lbls, col=colours, clockwise = TRUE)
+```
+
+## Performance of Portfolios
+
+```{r backtest}
+### BackTest ###
+backtestReturns <- xts(R_it)
+
+backtestReturns$low <- 0
+backtestReturns$mid <- 0
+backtestReturns$high <- 0
+
+colnames(backtestReturns) <- c(tickers,c("low", "mid", "high"))
+for (i in tickers) {
+  backtestReturns[,"low"] <- backtestReturns[,"low"] + backtestReturns[,i]*frontier_info_box[l,i]
+  backtestReturns[,"mid"] <- backtestReturns[,"mid"] + backtestReturns[,i]*frontier_info_box[m,i]
+  backtestReturns[,"high"] <- backtestReturns[,"high"] + backtestReturns[,i]*frontier_info_box[h,i]
+}
+
+backtestReturns <- na.omit(backtestReturns)
+
+
+#print(backtestReturns)
+
+backtest.data <- data.frame(
+  date <- as.yearmon(seq(as.Date("2010-11-01"), as.Date("2022-03-01"), by = "month")),
+  low <- cumprod(1+backtestReturns[,"low"]),
+  mid <- cumprod(1+backtestReturns[,"mid"]),
+  high <- cumprod(1+backtestReturns[,"high"])
+  
+)
+ggplot(backtest.data, aes(date)) + 
+  geom_line(aes(y=low, colour="Low Risk")) + 
+  geom_line(aes(y=mid, colour="Mid Risk")) +
+  geom_line(aes(y=high, colour="High Risk")) +
+  labs(x="Date", y="Cumulative Returns", colour="Portfolio") +
+  scale_colour_manual(values=c("red", "green", "cyan","yellow")) +
+  theme(legend.position="bottom") +
+  scale_fill_discrete(limits=c('High Risk', 'Mid Risk', 'Low Risk'))
+```
+
+# Appendix
+
+## Methodology
+
+1. Identify ETFs
+    + Source for other ETFs
+    + Omit ETFs (Justification in appendix) 
+2. Prepare data
+    + Obtain adjusted closing price for each ETF
+    + Obtain proxies for ETFs that do not have data dating back to our chosen start date
+        + VOO proxied by SPY
+        + DBEM proxied by EEM
+        + VCSH proxied by IGSB
+        + BNDX & BIV proxied by AGG
+        + BCI proxied by DBC
+        + ICLN proxied by PBW
+    + Account for currency differences
+    + Obtain individual ETF returns, $R_{i}$, and market returns, $R_{mkt}$
+    + Get data of a 60% ACWI, 40% BGA market portfolio 
+
+## Methodology
+3. Calculate $\beta_{i}$ for each ETF by regressing $R_{i, t} = \alpha + \beta_{i}R_{mkt, t}$
+4. Obtain mean and standard deviation for each ETF
+    + Calculate historical mean and standard deviation
+    + Calculate CAPM mean using $E(R_{i}) = \mu_{CAPM} = r_{f} + \beta_{i}E(R_{mkt})$
+      + Take the risk-free rate to be equivalent to the yield on a 20-year Japanese Government bond, $r_{f}$ = 0.76%
+      + Take the expected market returns to be $E(R_{mkt})$ = 5%
+    + Calculate $\mu$ using $\mu = \frac{2}{3}\mu_{CAPM} + \frac{1}{3}\mu_{hist}$
+5. Get portfolio
+    + Get portfolio weights from $\mu$ and covariance
+    + Generate efficient frontier using fPortfolio
+    + From the efficient frontier, obtain low, medium, high risk portfolios
+6. Backtest, amend initial portfolio choices.
+
+
+
+## Reasons for omitting some ETFs
+
+### Equities
+* Omit SPY
+    + SPY an almost identical composition to VOO
+    + However, SPY is omitted due to its higher expense ratio of 0.09% compared to VOO's of 0.04%
+* Omit HVST AU
+    + HVST AU is omitted due to a historical downward trend in daily returns
+* Omit VO & VT
+    + VO and VT are omitted due to its extremely high correlation with VOO
+    
+```{r}
+VO <- Ad(to.monthly(getSymbols("VO", auto.assign=FALSE, from="1997-12-31", src='yahoo')))
+VOO  <- Ad(to.monthly(getSymbols("VOO", auto.assign=FALSE, from="1997-12-31", src='yahoo')))
+VT  <- Ad(to.monthly(getSymbols("VT", auto.assign=FALSE, from="1997-12-31", src='yahoo')))
+cor.omit <- round(cor(cbind(R_it[,"VOO"],Return.calculate(VO)[-1], Return.calculate(VT)[-1]), use="pairwise.complete.obs"),2)
+colnames(cor.omit) <- c("VO","VOO", "VT")
+rownames(cor.omit) <- c("VO","VOO", "VT")
+kable(list(cor.omit))
+```
+    
+## Reasons for omitting some ETFs
+
+### REITs
+* Omit JP 1555
+    + 1555 is omitted due to high expense ratio of 0.45%
+* Omit JP 1343
+    + 1343.JT is omitted as VNQI already possesses stocks in 1343.JT
+
+
+
+## ICLN introduced
+
+- iShares Global Clean Energy ETF (ICLN)
+    + Exposure to companies that produce \textcolor{red}{energy from solar, wind, and other renewable sources}
+    + Composition (Top 10 Holdings)
+```{r iprp exposure}
+knitr::include_graphics("./ICLN.png")
+```
+    
+## Correlation Matrix
+
+```{r}
+cor <- round(cor,2)
+kable(cor) %>% kable_styling(latex_options = "scale_down")
+```
+
+## Plot of BDNX Returns against AGG Returns
+
+```{r plot BNDX}
+BNDX <- Return.calculate(Ad(to.monthly(getSymbols("BNDX", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+AGG <- Return.calculate(Ad(to.monthly(getSymbols("AGG", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+p <- plot(AGG, col="green", main = "", ylim=range(-0.05,0.1))
+lines(BNDX, col= "blue", lwd=2)
+```
+Legend: 
+\textcolor{green}{Proxy: AGG}
+,
+\textcolor{blue}{BNDX}
+
+## Plot of BIV Returns against AGG Returns
+
+```{r plot BIV}
+BIV <- Return.calculate(Ad(to.monthly(getSymbols("BIV", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+AGG <- Return.calculate(Ad(to.monthly(getSymbols("AGG", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+p <- plot(AGG, col="green", main = "", ylim=range(-0.1,0.1))
+lines(BIV, col= "blue", lwd=2)
+```
+Legend: 
+\textcolor{green}{Proxy: AGG} 
+,
+\textcolor{blue}{BIV}
+
+## Plot of VCSH Returns against IGSB Returns
+
+```{r plot VCSH}
+VCSH <- Return.calculate(Ad(to.monthly(getSymbols("VCSH", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+IGSB <- Return.calculate(Ad(to.monthly(getSymbols("IGSB", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+p <- plot(IGSB, col="green", main = "", ylim=range(-0.05,0.05))
+lines(VCSH, col= "blue", lwd=2)
+```
+Legend: 
+\textcolor{green}{Proxy: IGSB} 
+,
+\textcolor{blue}{VCSH}
+
+## Plot of DBEM Returns against EEM Returns
+
+```{r plot DBEM}
+DBEM <- Return.calculate(Ad(to.monthly(getSymbols("DBEM", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+EEM <- Return.calculate(Ad(to.monthly(getSymbols("EEM", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+p <- plot(EEM, col="green", main = "", ylim=range(-0.5,0.25))
+lines(DBEM, col= "blue", lwd=2)
+```
+Legend: 
+\textcolor{green}{Proxy: EEM} 
+,
+\textcolor{blue}{DBEM}
+
+## Plot of VOO Returns against SPY Returns
+
+```{r plot VOO}
+VOO <- Return.calculate(Ad(to.monthly(getSymbols("VOO", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+SPY <- Return.calculate(Ad(to.monthly(getSymbols("SPY", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+p <- plot(SPY, col="green", main = "", ylim=range(-0.25,0.25))
+lines(VOO, col= "blue", lwd=2)
+```
+Legend: 
+\textcolor{green}{Proxy: SPY}
+,
+\textcolor{blue}{VOO}
+
+## Plot of BCI Returns against DBC Returns
+
+```{r plot BCI}
+BCI <- Return.calculate(Ad(to.monthly(getSymbols("BCI", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+DBC <- Return.calculate(Ad(to.monthly(getSymbols("DBC", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+p <- plot(DBC, col="green", main = "", ylim=range(-0.5,0.5))
+lines(BCI, col= "blue", lwd=2)
+```
+Legend: 
+\textcolor{green}{Proxy: DBC} 
+,
+\textcolor{blue}{BCI}
+
+## Plot of ICLN Returns against PBW Returns
+
+```{r plot ICLN}
+ICLN <- Return.calculate(Ad(to.monthly(getSymbols("ICLN", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+PBW <- Return.calculate(Ad(to.monthly(getSymbols("PBW", auto.assign=FALSE, from=start, src='yahoo'))))[-1]
+p <- plot(PBW, col="green", main = "", ylim=range(-0.5,0.5))
+lines(ICLN, col= "blue", lwd=2)
+```
+Legend: 
+\textcolor{green}{Proxy: PBW}
+, 
+\textcolor{blue}{ICLN}
+
